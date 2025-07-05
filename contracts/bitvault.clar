@@ -202,3 +202,111 @@
     (ok true)
   )
 )
+
+(define-public (resume-bridge)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (var-get bridge-paused) ERR-INVALID-BRIDGE-STATUS)
+    (var-set bridge-paused false)
+    (ok true)
+  )
+)
+
+;; VALIDATOR MANAGEMENT FUNCTIONS
+
+(define-public (add-validator (validator principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-principal validator) ERR-INVALID-VALIDATOR-ADDRESS)
+    (map-set validators validator true)
+    (ok true)
+  )
+)
+
+(define-public (remove-validator (validator principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-principal validator) ERR-INVALID-VALIDATOR-ADDRESS)
+    (map-set validators validator false)
+    (ok true)
+  )
+)
+
+;; CORE BRIDGE OPERATIONS
+
+(define-public (initiate-deposit
+    (tx-hash (buff 32))
+    (amount uint)
+    (recipient principal)
+    (btc-sender (buff 33))
+  )
+  (begin
+    (asserts! (not (var-get bridge-paused)) ERR-BRIDGE-PAUSED)
+    (asserts! (validate-deposit-amount amount) ERR-INVALID-AMOUNT)
+    (asserts! (unwrap! (map-get? validators tx-sender) ERR-NOT-AUTHORIZED)
+      ERR-NOT-AUTHORIZED
+    )
+    (asserts! (is-valid-tx-hash tx-hash) ERR-INVALID-TX-HASH)
+    (asserts! (is-none (map-get? deposits { tx-hash: tx-hash }))
+      ERR-ALREADY-PROCESSED
+    )
+    (asserts! (is-valid-principal recipient) ERR-INVALID-RECIPIENT-ADDRESS)
+    (asserts! (is-valid-btc-address btc-sender) ERR-INVALID-BTC-ADDRESS)
+    (let ((validated-deposit {
+        amount: amount,
+        recipient: recipient,
+        processed: false,
+        confirmations: u0,
+        timestamp: stacks-block-height,
+        btc-sender: btc-sender,
+      }))
+      (map-set deposits { tx-hash: tx-hash } validated-deposit)
+      (ok true)
+    )
+  )
+)
+
+(define-public (confirm-deposit
+    (tx-hash (buff 32))
+    (signature (buff 65))
+  )
+  (let (
+      (deposit (unwrap! (map-get? deposits { tx-hash: tx-hash }) ERR-INVALID-BRIDGE-STATUS))
+      (is-validator (unwrap! (map-get? validators tx-sender) ERR-NOT-AUTHORIZED))
+    )
+    (asserts! (not (var-get bridge-paused)) ERR-BRIDGE-PAUSED)
+    (asserts! (is-valid-tx-hash tx-hash) ERR-INVALID-TX-HASH)
+    (asserts! (is-valid-signature signature) ERR-INVALID-SIGNATURE-FORMAT)
+    (asserts! (not (get processed deposit)) ERR-ALREADY-PROCESSED)
+    (asserts! (>= (get confirmations deposit) REQUIRED-CONFIRMATIONS)
+      ERR-INVALID-BRIDGE-STATUS
+    )
+    (asserts!
+      (is-none (map-get? validator-signatures {
+        tx-hash: tx-hash,
+        validator: tx-sender,
+      }))
+      ERR-ALREADY-PROCESSED
+    )
+    (let ((validated-signature {
+        signature: signature,
+        timestamp: stacks-block-height,
+      }))
+      (map-set validator-signatures {
+        tx-hash: tx-hash,
+        validator: tx-sender,
+      }
+        validated-signature
+      )
+      (map-set deposits { tx-hash: tx-hash } (merge deposit { processed: true }))
+      (map-set bridge-balances (get recipient deposit)
+        (+ (default-to u0 (map-get? bridge-balances (get recipient deposit)))
+          (get amount deposit)
+        ))
+      (var-set total-bridged-amount
+        (+ (var-get total-bridged-amount) (get amount deposit))
+      )
+      (ok true)
+    )
+  )
+)
